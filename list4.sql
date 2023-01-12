@@ -5,7 +5,7 @@ CREATE OR REPLACE TYPE KOCURY_T AS OBJECT(
 	plec VARCHAR2(1),
 	pseudo VARCHAR2(15),
 	funkcja VARCHAR2(10),
-	szef REF KOCURY_TYP,
+	szef REF KOCURY_T,
 	w_stadku_od DATE,
 	przydzial_myszy NUMBER(3),
 	myszy_extra NUMBER(3),
@@ -104,9 +104,9 @@ CREATE TABLE Plebs OF PLEBS_T
 
 CREATE TABLE Elita OF ELITA_T
 (
-	CONSTRAINT elita_pk PRIMARY KEY(id_elity)
+	CONSTRAINT elita_pk PRIMARY KEY(id_elity),
 	kocur NOT NULL,
-	sluga SCOPE IS Plebs,
+	sluga SCOPE IS Plebs
 );
 
 CREATE TABLE Konto OF KONTO_T
@@ -125,6 +125,40 @@ CREATE TABLE Incydenty OF INCYDENTY_T
 	CONSTRAINT inc_wrog_fk FOREIGN KEY (imie_wroga) REFERENCES Wrogowie(imie_wroga),
 	data_incydentu NOT NULL
 );
+------TRIGGERS--- TO CHECK---
+CREATE OR REPLACE TRIGGER Check_Elita
+    BEFORE INSERT OR UPDATE
+    ON Elita
+    FOR EACH ROW
+DECLARE
+    countPlebs NUMBER;
+    countElita NUMBER;
+BEGIN
+    SELECT COUNT(kocur) INTO countPlebs FROM Plebs Pleb WHERE Pleb.kocur = :NEW.kocur;
+    SELECT COUNT(kocur) INTO countElita FROM Elita Eli WHERE Eli.kocur = :NEW.kocur;
+    IF countPlebs + countElita > 0 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'Kot juz jest przypisany.');
+    END IF;
+END;
+
+
+DROP TRIGGER Check_Elita;
+
+CREATE OR REPLACE TRIGGER Check_Plebs
+    BEFORE INSERT OR UPDATE
+    ON Plebs
+    FOR EACH ROW
+DECLARE
+    countPlebs NUMBER;
+    countElita NUMBER;
+BEGIN
+    SELECT COUNT(kocur) INTO countPlebs FROM Plebs Pleb WHERE Pleb.kocur = :NEW.kocur;
+    SELECT COUNT(kocur) INTO countElita FROM Elita Eli WHERE Eli.kocur = :NEW.kocur;
+    IF countPlebs + countElita > 0 THEN
+        RAISE_APPLICATION_ERROR(-20001, 'Kot juz jest przypisany.');
+    END IF;
+END;
+DROP TRIGGER Check_Plebs;
 
 DELETE Incydenty;
 DELETE Konto;
@@ -186,6 +220,9 @@ INSERT ALL
     INTO Plebs VALUES(10,(SELECT REF(K) FROM KocuryR K WHERE pseudo='DAMA'))
 	INTO Plebs VALUES(11,(SELECT REF(K) FROM KocuryR K WHERE pseudo='ZERO'))
 SELECT * FROM DUAL;
+
+DELETE FROM Plebs Where id_plebsu = '11';
+INSERT INTO Plebs VALUES(11,(SELECT REF(K) FROM KocuryR K WHERE pseudo='ZERO'));
 
 INSERT ALL
     INTO Elita VALUES(1,(SELECT REF(K) FROM KocuryR K WHERE pseudo='TYGRYS'),(SELECT REF(P) FROM Plebs P WHERE id_plebsu=1))
@@ -335,3 +372,240 @@ CREATE TABLE Myszy
 	data_zlowienia DATE,
 	data_wydania DATE
 );
+-------------------------DOPISYWANIE MYSZY-------------------------
+DECLARE
+    data_start DATE:=TO_DATE('2004-01-01');
+    data_end DATE:=TO_DATE('2023-01-24');
+    liczba_miesiecy INTEGER := MONTHS_BETWEEN(data_end, data_start);
+    
+    TYPE t_myszy IS TABLE OF Myszy%ROWTYPE INDEX BY BINARY_INTEGER;
+    myszki t_myszy;
+
+    CURSOR ostatnie_srody IS 
+		SELECT NEXT_DAY(LAST_DAY(ADD_MONTHS(sysdate, -rowNumber + 1)) - 7, 3) "date"
+		FROM (SELECT ROWNUM rowNumber
+			  FROM DUAL
+              CONNECT BY LEVEL <= liczba_miesiecy+1);
+						
+    TYPE t_w_stadku_od IS TABLE OF Kocury.w_stadku_od%TYPE INDEX BY BINARY_INTEGER;
+    srody t_w_stadku_od;        
+                
+    first_day_month DATE;
+    avg_spoz_month NUMBER;
+    spoz_month NUMBER := 0;
+    index_myszy NUMBER := 1;
+	index_myszy_wpisanie NUMBER;
+
+    i_sroda BINARY_INTEGER;
+	i_pMyszy BINARY_INTEGER;
+	i_pseudo BINARY_INTEGER;
+    i_avg BINARY_INTEGER;
+    i_kocur BINARY_INTEGER;
+
+
+    TYPE t_pseudo IS TABLE OF Kocury.pseudo%TYPE;
+    TYPE t_pMyszy IS TABLE OF Kocury.przydzial_myszy%TYPE;
+    TYPE t_wso IS TABLE OF Kocury.w_stadku_od%TYPE;
+    tab_pseudo t_pseudo:=t_pseudo();
+    tab_pMyszy t_pMyszy:=t_pMyszy();
+    tab_wso t_wso:=t_wso();
+	
+BEGIN
+    DELETE FROM Myszy;
+    
+    OPEN ostatnie_srody;
+    FETCH ostatnie_srody BULK COLLECT INTO srody;
+    CLOSE ostatnie_srody;
+    
+    FOR i_sroda IN 1..(srody.COUNT-1)
+    LOOP
+        index_myszy_wpisanie := index_myszy;
+
+        first_day_month:=TRUNC(srody(i_sroda), 'MONTH');
+        
+        SELECT pseudo, NVL(przydzial_myszy, 0) + NVL(myszy_extra,0), w_stadku_od
+			BULK COLLECT INTO tab_pseudo, tab_pMyszy, tab_wso 
+		FROM Kocury
+        WHERE w_stadku_od < srody(i_sroda)
+        START WITH szef IS NULL CONNECT BY PRIOR pseudo=szef;
+    
+        --generowanie spozycia w miesiacu oraz sredniego
+        FOR i_pMyszy IN 1..tab_pMyszy.COUNT
+        LOOP 
+			spoz_month:= spoz_month + tab_pMyszy(i_pMyszy); 
+		END LOOP;
+        avg_spoz_month := CEIL(spoz_month / tab_pMyszy.COUNT);
+        
+        --dodawanie myszy
+        FOR i_pseudo IN 1..tab_pseudo.COUNT
+        LOOP
+            IF tab_wso(i_pseudo) > first_day_month THEN 
+				first_day_month:=tab_wso(i_pseudo); 
+			END IF;   
+			
+            FOR i_avg IN 1..avg_spoz_month
+            LOOP
+                myszki(index_myszy).nr_myszy := index_myszy;
+                myszki(index_myszy).lowca := tab_pseudo(i_pseudo);
+                myszki(index_myszy).waga_myszy := CEIL(DBMS_RANDOM.VALUE(2, 10));
+                myszki(index_myszy).data_zlowienia := first_day_month + DBMS_RANDOM.VALUE(0, srody(i_sroda) - first_day_month);
+                index_myszy := index_myszy + 1;
+            END LOOP;
+            spoz_month := spoz_month - avg_spoz_month;
+            IF spoz_month < avg_spoz_month THEN 
+                avg_spoz_month:= spoz_month; 
+            END IF;
+        END LOOP;
+        
+        --wyplata myszy zgodnie z hierarchią
+        IF data_end >= srody(i_sroda) THEN 
+            i_kocur:=1;
+            LOOP
+                IF tab_pMyszy(i_kocur) > 0 THEN 
+                    myszki(index_myszy_wpisanie).zjadacz := tab_pseudo(i_kocur);
+                    myszki(index_myszy_wpisanie).data_wydania := srody(i_sroda);
+                    tab_pMyszy(i_kocur) := tab_pMyszy(i_kocur)-1;
+                    index_myszy_wpisanie := index_myszy_wpisanie+1;
+                END IF;
+                IF i_kocur = tab_pseudo.COUNT THEN 
+					i_kocur:=1; 
+				ELSE 
+					i_kocur:=i_kocur+1; 
+				END IF;
+                
+				EXIT WHEN index_myszy_wpisanie = index_myszy;
+            END LOOP;
+        END IF;    
+    END LOOP;
+    DBMS_OUTPUT.PUT_LINE('ilosc_myszek='||myszki.COUNT);
+    --wyslanie kolekcji myszek
+    FORALL i IN 1..myszki.COUNT 
+    INSERT INTO Myszy VALUES(
+        myszki(i).nr_myszy,
+        myszki(i).lowca,
+        myszki(i).zjadacz,
+        myszki(i).waga_myszy,
+        myszki(i).data_zlowienia,
+        myszki(i).data_wydania
+    );
+END;
+/	
+
+
+-------------------------Procedury
+CREATE OR REPLACE PROCEDURE dodaj_myszy(pseudo VARCHAR, dzien_polowania DATE, ile_mysz NUMBER)
+IS
+    numer_myszy NUMBER;
+    avg_mysz NUMBER;
+    zlowione_w_miesiacu NUMBER;
+    
+    TYPE t_myszy IS TABLE OF Myszy%ROWTYPE INDEX BY BINARY_INTEGER;
+    myszki t_myszy;
+
+    za_duzo_mysz EXCEPTION;
+    i BINARY_INTEGER;
+BEGIN
+    SELECT AVG(NVL(przydzial_myszy, 0)+NVL(myszy_extra,0)) INTO avg_mysz 
+    FROM Kocury;
+
+    SELECT COUNT(*) INTO zlowione_w_miesiacu
+    FROM Myszy
+    WHERE lowca=pseudo AND data_zlowienia > TRUNC(dzien_polowania, 'MONTH');
+
+    IF ile_mysz > (avg_mysz-zlowione_w_miesiacu) THEN 
+        RAISE za_duzo_mysz;
+    END IF;
+
+    SELECT MAX(nr_myszy) INTO numer_myszy 
+    FROM Myszy;
+
+    FOR i IN 1..ile_mysz
+    LOOP
+        numer_myszy:=numer_myszy+1;
+        myszki(i).nr_myszy := numer_myszy;
+        myszki(i).lowca := pseudo;
+        myszki(i).waga_myszy := CEIL(DBMS_RANDOM.VALUE(2, 10));
+        myszki(i).data_zlowienia := dzien_polowania;
+    END LOOP;
+
+    FORALL i IN 1..myszki.COUNT 
+    INSERT INTO Myszy VALUES(
+        myszki(i).nr_myszy,
+        myszki(i).lowca,
+        myszki(i).zjadacz,
+        myszki(i).waga_myszy,
+        myszki(i).data_zlowienia,
+        myszki(i).data_wydania
+    );
+    EXCEPTION
+        WHEN za_duzo_mysz THEN DBMS_OUTPUT.PUT_LINE('Za duzo mysz');
+END;
+/
+
+
+
+CREATE OR REPLACE PROCEDURE wyplata_mysz(sroda DATE)   
+IS
+    TYPE t_pseudo IS TABLE OF Kocury.pseudo%TYPE;
+    tab_pseudo t_pseudo:=t_pseudo();
+    TYPE t_pMyszy IS TABLE OF Kocury.przydzial_myszy%TYPE;
+    tab_pMyszy t_pMyszy:=t_pMyszy();
+    TYPE t_myszy IS TABLE OF Myszy%ROWTYPE INDEX BY BINARY_INTEGER;
+    myszki t_myszy;
+
+    i_mysza NUMBER:=1;
+    i_kocur NUMBER:=1;
+
+BEGIN
+
+    SELECT * BULK COLLECT INTO myszki 
+    FROM Myszy 
+    WHERE data_wydania IS NULL;
+
+    DBMS_OUTPUT.PUT_LINE('Do wyplacenia: '|| myszki.count);
+
+    SELECT pseudo, NVL(przydzial_myszy, 0) + NVL(myszy_extra,0) 
+    BULK COLLECT INTO tab_pseudo, tab_pMyszy 
+    FROM Kocury
+    START WITH szef IS NULL
+    CONNECT BY PRIOR pseudo=szef;
+
+    LOOP
+        IF tab_pMyszy(i_kocur)>0 THEN
+            myszki(i_mysza).zjadacz := tab_pseudo(i_kocur);
+            myszki(i_mysza).data_wydania := sroda;
+            tab_pMyszy(i_kocur) := tab_pMyszy(i_kocur)-1;
+            i_mysza:= i_mysza+1;
+        END IF;
+
+        IF i_kocur = tab_pseudo.COUNT THEN 
+            i_kocur:=1; 
+        ELSE 
+            i_kocur:=i_kocur+1; 
+        END IF;
+        EXIT WHEN i_mysza > myszki.COUNT;
+    END LOOP;
+
+    FORALL i_mysza IN 1..myszki.COUNT 
+        UPDATE Myszy SET 
+            zjadacz=myszki(i_mysza).zjadacz,
+            data_wydania=myszki(i_mysza).data_wydania
+        WHERE nr_myszy=myszki(i_mysza).nr_myszy;
+END;
+/
+
+EXECUTE dodaj_myszy('TYGRYS',TO_DATE('2023-01-04'),5);
+SELECT COUNT(*) 
+FROM Myszy 
+WHERE TO_DATE(data_zlowienia) = TO_DATE('2023-01-04');
+
+SELECT SUM(NVL(przydzial_myszy, 0)+NVL(myszy_extra, 0)) 
+FROM Kocury 
+WHERE w_stadku_od < TO_DATE('2023-01-25');
+
+EXECUTE wyplata_mysz('2023-01-25');
+
+SELECT COUNT(*) 
+FROM Myszy WHERE data_wydania IS NULL;
+ROLLBACK;
+
