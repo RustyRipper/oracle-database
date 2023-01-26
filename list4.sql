@@ -273,7 +273,7 @@ COMMIT;
 -----Referencja
 
 SELECT Elit.kocur.Dane() "Dane wlasciciela konta", Kon.data_wprowadzenia "Data wprowadzenia"
-FROM Elita Elit LEFT JOIN Konto Kon ON K.wlasciciel_konta=REF(Elit)
+FROM Elita Elit LEFT JOIN Konto Kon ON Kon.wlasciciel_konta=REF(Elit)
 WHERE Kon.data_wprowadzenia > Kon.data_usuniecia OR Kon.data_usuniecia IS NULL;
 
 -----Podzapytanie
@@ -281,7 +281,7 @@ WHERE Kon.data_wprowadzenia > Kon.data_usuniecia OR Kon.data_usuniecia IS NULL;
 SELECT Pleb.kocur.imie "Imie", Pleb.kocur.funkcja, 
 	NVL(Pleb.kocur.przydzial_myszy,0)+NVL(Pleb.kocur.myszy_extra,0) "Dochod"
 FROM Plebs Pleb
-WHERE P.kocur.pseudo IN (SELECT Elit.sluga.kocur.pseudo
+WHERE Pleb.kocur.pseudo IN (SELECT Elit.sluga.kocur.pseudo
                          FROM Elita Elit);
 						 
 -----Grupowanie
@@ -363,16 +363,19 @@ END;
 
 -- ZAD49
 
-CREATE TABLE Myszy 
-(
-	nr_myszy NUMBER CONSTRAINT myszy_pk PRIMARY KEY,
-	lowca VARCHAR2(15) CONSTRAINT lowca_fk REFERENCES Kocury(pseudo),
-	zjadacz VARCHAR2(15) CONSTRAINT zjadacz_fk REFERENCES Kocury(pseudo),
-	waga_myszy NUMBER(3),
-	data_zlowienia DATE,
-	data_wydania DATE
-);
+BEGIN
+	EXECUTE IMMEDIATE 'CREATE TABLE Myszy (
+    nr_myszy NUMBER CONSTRAINT myszy_pk PRIMARY KEY,
+    lowca VARCHAR2(15) CONSTRAINT lowca_fk REFERENCES Kocury(pseudo),
+    zjadacz VARCHAR2(15) CONSTRAINT zjadacz_fk REFERENCES Kocury(pseudo),
+    waga_myszy NUMBER(3),
+    data_zlowienia DATE,
+    data_wydania DATE)';
+END;
+
+DROP TABLE MYSZY;
 -------------------------DOPISYWANIE MYSZY-------------------------
+ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD';
 DECLARE
     data_start DATE:=TO_DATE('2004-01-01');
     data_end DATE:=TO_DATE('2023-01-24');
@@ -411,7 +414,7 @@ DECLARE
     tab_wso t_wso:=t_wso();
 	
 BEGIN
-    DELETE FROM Myszy;
+    
     
     OPEN ostatnie_srody;
     FETCH ostatnie_srody BULK COLLECT INTO srody;
@@ -490,9 +493,28 @@ BEGIN
     );
 END;
 /	
-
+DELETE FROM Myszy;
 
 -------------------------Procedury
+BEGIN
+   FOR kot in (SELECT pseudo FROM Kocury)
+    LOOP
+       EXECUTE IMMEDIATE 'CREATE TABLE Myszy_kota_' || kot.pseudo || '(' ||
+           'nr_myszy NUMBER PRIMARY KEY,' ||
+           'waga_myszy NUMBER,' ||
+           'data_zlowienia DATE NOT NULL)' ;
+    END LOOP;
+END;
+
+BEGIN
+    FOR kot IN (SELECT pseudo FROM Kocury)
+    LOOP
+        EXECUTE IMMEDIATE 'DROP TABLE Myszy_kota_' || kot.pseudo;
+    END LOOP;
+END;
+
+
+
 CREATE OR REPLACE PROCEDURE dodaj_myszy(pseudo VARCHAR, dzien_polowania DATE, ile_mysz NUMBER)
 IS
     numer_myszy NUMBER;
@@ -543,6 +565,53 @@ END;
 /
 
 
+CREATE OR REPLACE PROCEDURE dodaj_myszy2(pseudoParam VARCHAR, dzien_polowania DATE)
+AS
+    TYPE t_waga IS TABLE OF NUMBER;
+        tab_waga t_waga := t_waga();
+    TYPE t_nr IS TABLE OF NUMBER;
+        tab_nr t_nr := t_nr();
+		
+    ile NUMBER;
+	
+    zly_kot EXCEPTION;
+    brak_myszy_data EXCEPTION;
+BEGIN
+
+    SELECT COUNT(Koc.pseudo) INTO ile
+	FROM Kocury Koc
+	WHERE Koc.pseudo = UPPER(pseudoParam);
+	
+    IF ile = 0 
+		THEN RAISE zly_kot;
+	END IF;
+
+    EXECUTE IMMEDIATE 'SELECT nr_myszy, waga_myszy FROM Myszy_kota_'|| pseudoParam || ' WHERE data_zlowienia= ''' || dzien_polowania || ''''
+        BULK COLLECT INTO tab_nr, tab_waga;
+		
+    IF tab_nr.COUNT = 0 THEN
+        RAISE brak_myszy_data;
+    END IF;
+
+    FORALL i in 1..tab_nr.COUNT
+        INSERT INTO Myszy VALUES (
+		tab_nr(i), 
+		UPPER(pseudoParam), 
+		NULL,
+		tab_waga(i),
+		dzien_polowania, 
+		NULL
+	);
+
+    EXECUTE IMMEDIATE 'DELETE FROM Myszy_kota_' || pseudoParam || ' WHERE data_zlowienia= ''' || dzien_polowania || '''';
+	
+    EXCEPTION
+        WHEN zly_kot THEN DBMS_OUTPUT.PUT_LINE('Brak takiej tabeli Myszy_kota_'|| UPPER(pseudoParam));
+        WHEN brak_myszy_data THEN DBMS_OUTPUT.PUT_LINE('Brak myszy w podanej dacie');
+END;
+/
+
+
 
 CREATE OR REPLACE PROCEDURE wyplata_mysz(sroda DATE)   
 IS
@@ -555,9 +624,11 @@ IS
 
     i_mysza NUMBER:=1;
     i_kocur NUMBER:=1;
+    niepoprawna_sroda EXCEPTION;
 
 BEGIN
-
+	--IF sroda != NEXT_DAY(LAST_DAY(sroda) - 7, 3) THEN RAISE niepoprawna_sroda; END IF;
+	
     SELECT * BULK COLLECT INTO myszki 
     FROM Myszy 
     WHERE data_wydania IS NULL;
@@ -591,10 +662,15 @@ BEGIN
             zjadacz=myszki(i_mysza).zjadacz,
             data_wydania=myszki(i_mysza).data_wydania
         WHERE nr_myszy=myszki(i_mysza).nr_myszy;
+    EXCEPTION
+        WHEN niepoprawna_sroda THEN DBMS_OUTPUT.PUT_LINE('To nie ostatnia sroda');		
 END;
 /
-
-EXECUTE dodaj_myszy('TYGRYS',TO_DATE('2023-01-04'),5);
+DROP PROCEDURE wyplata_mysz;
+INSERT INTO Myszy_kota_TYGRYS (nr_myszy, waga_myszy, data_zlowienia) VALUES (215999, 3,  TO_DATE('2023-02-01'));
+SELECT * FROM Myszy_kota_TYGRYS;
+EXECUTE dodaj_myszy('TYGRYS',TO_DATE('2023-03-21'),5);
+EXECUTE dodaj_myszy2('TYGRYS', TO_DATE('2023-02-01'));
 SELECT COUNT(*) 
 FROM Myszy 
 WHERE TO_DATE(data_zlowienia) = TO_DATE('2023-01-04');
@@ -603,9 +679,109 @@ SELECT SUM(NVL(przydzial_myszy, 0)+NVL(myszy_extra, 0))
 FROM Kocury 
 WHERE w_stadku_od < TO_DATE('2023-01-25');
 
-EXECUTE wyplata_mysz('2023-01-25');
+EXECUTE wyplata_mysz('2023-01-24');
+EXECUTE wyplata_mysz(TO_DATE('2023-01-24','YYYY-MM-DD'));
+
 
 SELECT COUNT(*) 
 FROM Myszy WHERE data_wydania IS NULL;
 ROLLBACK;
+
+-----------------------------------------------------------
+--DOKRETKA
+
+--znalezc ile myszy na stanie posiada kazdy kot plci meskiej ktory do tej pory nie uczestniczyl w incydencie
+SELECT k.pseudo, COUNT(kc.wlasciciel_konta.kocur)
+FROM KocuryR k, Konto kc
+WHERE k.plec = 'M'
+	AND k.pseudo NOT IN (SELECT i.ofiara.pseudo FROM Incydenty i)
+	AND kc.wlasciciel_konta.kocur = REF(k)
+GROUP BY k.pseudo;
+-- jedno podzapytanie, tylko referencje
+
+-- dorobic ograniczenia w wyplatach zeby byla tylko sroda i zeby nie mozna bylo dwa razy
+SELECT * FROM Wyplacone_srody;
+DELETE From Wyplacone_srody;
+
+CREATE TABLE Wyplacone_srody (
+   wyplacona_sroda DATE PRIMARY KEY
+);
+
+
+select NEXT_DAY(TO_DATE(LAST_DAY('2023-01-24')-7), 3) from dual;
+BEGIN
+DBMS_OUTPUT.PUT_LINE( NEXT_DAY(TO_DATE(LAST_DAY('2023-01-24')-7), 3));
+END;
+CREATE OR REPLACE PROCEDURE wyplata_mysz(srodaP DATE)   
+IS
+    sroda DATE:=srodaP;
+    sroda2 Date;
+    TYPE t_pseudo IS TABLE OF Kocury.pseudo%TYPE;
+    tab_pseudo t_pseudo:=t_pseudo();
+    TYPE t_pMyszy IS TABLE OF Kocury.przydzial_myszy%TYPE;
+    tab_pMyszy t_pMyszy:=t_pMyszy();
+    TYPE t_myszy IS TABLE OF Myszy%ROWTYPE INDEX BY BINARY_INTEGER;
+    myszki t_myszy;
+
+    i_mysza NUMBER:=1;
+    i_kocur NUMBER:=1;
+    niepoprawna_sroda EXCEPTION;
+    uzyta_sroda Number:=0;
+
+BEGIN
+
+    SELECT NEXT_DAY(TO_DATE(LAST_DAY(sroda)-7), 3) INTO sroda2 from dual;
+    DBMS_OUTPUT.PUT_LINE(TO_DATE(sroda,'YYYY-MM-DD'));
+    DBMS_OUTPUT.PUT_LINE(TO_DATE(sroda2,'YYYY-MM-DD'));
+    
+    IF sroda != sroda2  THEN 
+        RAISE niepoprawna_sroda; 
+    END IF;
+    
+    SELECT COUNT(*) INTO uzyta_sroda
+    FROM Wyplacone_srody 
+    WHERE wyplacona_sroda = sroda;
+    DBMS_OUTPUT.PUT_LINE(uzyta_sroda);
+    IF uzyta_sroda > 0 THEN
+        RAISE niepoprawna_sroda;
+    END IF;
+	INSERT INTO Wyplacone_srody(wyplacona_sroda)VALUES (sroda);
+    
+    SELECT * BULK COLLECT INTO myszki 
+    FROM Myszy 
+    WHERE data_wydania IS NULL;
+
+    DBMS_OUTPUT.PUT_LINE('Do wyplacenia: '|| myszki.count);
+
+    SELECT pseudo, NVL(przydzial_myszy, 0) + NVL(myszy_extra,0) 
+    BULK COLLECT INTO tab_pseudo, tab_pMyszy 
+    FROM Kocury
+    START WITH szef IS NULL
+    CONNECT BY PRIOR pseudo=szef;
+
+    LOOP
+        IF tab_pMyszy(i_kocur)>0 THEN
+            myszki(i_mysza).zjadacz := tab_pseudo(i_kocur);
+            myszki(i_mysza).data_wydania := sroda;
+            tab_pMyszy(i_kocur) := tab_pMyszy(i_kocur)-1;
+            i_mysza:= i_mysza+1;
+        END IF;
+
+        IF i_kocur = tab_pseudo.COUNT THEN 
+            i_kocur:=1; 
+        ELSE 
+            i_kocur:=i_kocur+1; 
+        END IF;
+        EXIT WHEN i_mysza > myszki.COUNT;
+    END LOOP;
+
+    FORALL i_mysza IN 1..myszki.COUNT 
+        UPDATE Myszy SET 
+            zjadacz=myszki(i_mysza).zjadacz,
+            data_wydania=myszki(i_mysza).data_wydania
+        WHERE nr_myszy=myszki(i_mysza).nr_myszy;
+    EXCEPTION
+        WHEN niepoprawna_sroda THEN DBMS_OUTPUT.PUT_LINE('Zla sroda');		
+END;
+/
 
